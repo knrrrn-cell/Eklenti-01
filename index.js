@@ -8,9 +8,9 @@ app.use(cors());
 
 const manifest = {
     id: "org.kanka.httpaddon",
-    version: "1.4.0",
-    name: "Kankas HTTP Multi-Stream (Vip Pro)",
-    description: "Hdfilmcehennemi ve FilmGecesi şifreli player kaynaklarını çözer.",
+    version: "1.5.0",
+    name: "Kankas HTTP Multi-Stream (Ultimate)",
+    description: "Hdfilmcehennemi ve FilmGecesi korumalarını otomatik api ile bypass eder.",
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"]
@@ -19,13 +19,11 @@ const manifest = {
 app.get('/', (req, res) => res.redirect('/manifest.json'));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
-// Bot filtrelerine takılmamak için en gerçekçi mobil tarayıcı başlığı
 const getHeaders = (host) => ({
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'tr-TR,tr;q=0.9',
-    'Referer': `https://${host}/`,
-    'Origin': `https://${host}`
+    'Referer': `https://${host}/`
 });
 
 async function getMovieNames(imdbId) {
@@ -44,33 +42,9 @@ async function getMovieNames(imdbId) {
 }
 
 // -------------------------------------------------------------------------
-// ŞİFRE ÇÖZÜCÜ MOTOR (Base64 ve Karmaşık Kod Çözücü)
+// HDFILMCEHENNEMI AUTOMATIC BYPASS API
 // -------------------------------------------------------------------------
-function extractPackedM3u8(htmlContent) {
-    // 1. Aşama: Sayfa içine gömülü çıplak m3u8 linklerini tara
-    const directM3u8Regex = /(https:\/\/[^\s'"]+master\.m3u8[^\s'"]*)/i;
-    let match = htmlContent.match(directM3u8Regex);
-    if (match) return match[1].replace(/&amp;/g, '&');
-
-    // 2. Aşama: Sitelerin video linkini gizlediği Base64 şifreli blokları tara (Gelişmiş Koruma Kırıcı)
-    const base64Regex = /["'](ey[a-zA-Z0-9_-]{10,}=*)["']/g;
-    let b64Match;
-    while ((b64Match = base64Regex.exec(htmlContent)) !== null) {
-        try {
-            const decoded = Buffer.from(b64Match[1], 'base64').toString('utf-8');
-            if (decoded.includes('master.m3u8') || decoded.includes('.m3u8')) {
-                const subMatch = decoded.match(/(https:\/\/[^\s'"]+master\.m3u8[^\s'"]*)/i);
-                if (subMatch) return subMatch[1].replace(/&amp;/g, '&');
-            }
-        } catch (e) {}
-    }
-    return null;
-}
-
-// -------------------------------------------------------------------------
-// SOURCE 1: HDFILMCEHENNEMI (Işık Hızı + Kilit Kırıcı)
-// -------------------------------------------------------------------------
-async function fastScrapeHFC(imdbId, names) {
+async function scrapeHFC(imdbId, names) {
     try {
         const host = 'www.hdfilmcehennemi.land';
         const searchWord = imdbId || names.trName || names.enName;
@@ -84,29 +58,39 @@ async function fastScrapeHFC(imdbId, names) {
 
         const filmPageResponse = await axios.get(filmLink, { headers: getHeaders(host), timeout: 5000 });
         const pageHtml = filmPageResponse.data;
+        const $page = cheerio.load(pageHtml);
 
-        // Şifre çözücü motorumuzu tetikliyoruz
-        const streamUrl = extractPackedM3u8(pageHtml);
+        // Sayfa içerisindeki iframe elementlerinden rapidrame veya close olanları süzüyoruz
+        let iframeSrc = $page('iframe[src*="rapidrame"], iframe[src*="close"], iframe[src*="video"]').first().attr('src');
+        
+        if (!iframeSrc && pageHtml.includes('iframe')) {
+            const regex = /iframe[^>]+src=["']([^"']+)["']/i;
+            const match = pageHtml.match(regex);
+            if (match) iframeSrc = match[1];
+        }
 
-        if (streamUrl) {
-            // Nuvio'nun linki doğrulaması için zorunlu Referer pipe köprüsü
-            const finalStreamUrl = `${streamUrl}|Referer=https://${host}/&User-Agent=Mozilla/5.0`;
+        if (iframeSrc) {
+            if (iframeSrc.startsWith('//')) iframeSrc = 'https:' + iframeSrc;
+
+            // Video şifrelerini sunucu tarafında çözen global bypass köprüsü
+            const streamResolverUrl = `https://94.23.63{encodeURIComponent(iframeSrc)}`;
+
             return {
-                name: "🎬 HFC - Rapidrame",
-                title: `Rapidrame [1080p Aktif Akış]`,
-                url: finalStreamUrl
+                name: "🎬 HFC - Premium Stream",
+                title: `Multi-Player [1080p Otomatik Çözüm]`,
+                url: streamResolverUrl
             };
         }
     } catch (e) {
-        console.error("HFC Hatası:", e.message);
+        console.error("HFC Hata:", e.message);
     }
     return null;
 }
 
 // -------------------------------------------------------------------------
-// SOURCE 2: FILMGECESI (Işık Hızı + Kilit Kırıcı)
+// FILMGECESI AUTOMATIC BYPASS API
 // -------------------------------------------------------------------------
-async function fastScrapeFilmGecesi(imdbId, names) {
+async function scrapeFilmGecesi(imdbId, names) {
     try {
         const host = 'www.filmgecesi.vip';
         const searchWord = imdbId || names.trName || names.enName;
@@ -119,18 +103,22 @@ async function fastScrapeFilmGecesi(imdbId, names) {
         if (!filmLink) return null;
 
         const filmPageResponse = await axios.get(filmLink, { headers: getHeaders(host), timeout: 5000 });
-        const streamUrl = extractPackedM3u8(filmPageResponse.data);
+        const $page = cheerio.load(filmPageResponse.data);
+        
+        let iframeSrc = $page('iframe').first().attr('src');
+        if (iframeSrc) {
+            if (iframeSrc.startsWith('//')) iframeSrc = 'https:' + iframeSrc;
+            
+            const streamResolverUrl = `https://94.23.63{encodeURIComponent(iframeSrc)}`;
 
-        if (streamUrl) {
-            const finalStreamUrl = `${streamUrl}|Referer=https://${host}/&User-Agent=Mozilla/5.0`;
             return {
-                name: "🎥 FilmGecesi - VIP",
-                title: `Rapidrame [HQ Aktif Akış]`,
-                url: finalStreamUrl
+                name: "🎥 FilmGecesi - Premium VIP",
+                title: `Multi-Player [HQ Otomatik Çözüm]`,
+                url: streamResolverUrl
             };
         }
     } catch (e) {
-        console.error("FilmGecesi Hatası:", e.message);
+        console.error("FilmGecesi Hata:", e.message);
     }
     return null;
 }
@@ -141,11 +129,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const names = await getMovieNames(id);
     if (!names) return res.json({ streams: [] });
 
-    console.log(`İstek İşleniyor -> ID: ${id} | İsim: ${names.trName}`);
-
     const tasks = [
-        fastScrapeHFC(id, names),
-        fastScrapeFilmGecesi(id, names)
+        scrapeHFC(id, names),
+        scrapeFilmGecesi(id, names)
     ];
 
     const results = await Promise.allSettled(tasks);
@@ -158,4 +144,4 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Kilit kırıcı sistem aktif duruma getirildi.`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Bypass API Sistemi Devrede.`));
