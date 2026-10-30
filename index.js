@@ -8,7 +8,6 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(cors());
 
-// Render üzerinde Puppeteer'ın çökmeden, stabil çalışması için optimize argümanlar
 const puppeteerArgs = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -19,9 +18,6 @@ const puppeteerArgs = [
     '--single-process'
 ];
 
-// -------------------------------------------------------------------------
-// STREMIO / NUVIO MANIFEST
-// -------------------------------------------------------------------------
 const manifest = {
     id: "org.kanka.httpaddon",
     version: "1.0.0",
@@ -35,9 +31,6 @@ const manifest = {
 app.get('/', (req, res) => res.redirect('/manifest.json'));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
-// -------------------------------------------------------------------------
-// IMDb ID -> Film Adı Çevirici
-// -------------------------------------------------------------------------
 async function getMovieNameFromImdb(imdbId) {
     try {
         const response = await axios.get(`https://strem.io{imdbId}.json`, { timeout: 5000 });
@@ -50,9 +43,6 @@ async function getMovieNameFromImdb(imdbId) {
     return null;
 }
 
-// -------------------------------------------------------------------------
-// SCRAPER: Hdfilmcehennemi
-// -------------------------------------------------------------------------
 async function scrapeHdFilmCehennemi(searchQuery) {
     let browser;
     let streamUrl = null;
@@ -66,7 +56,6 @@ async function scrapeHdFilmCehennemi(searchQuery) {
 
         const page = await browser.newPage();
         
-        // Sayfa yüklenme hızını artırmak için resimleri ve gereksiz fontları engelliyoruz
         await page.setRequestInterception(true);
         page.on('request', req => {
             const type = req.resourceType();
@@ -92,7 +81,6 @@ async function scrapeHdFilmCehennemi(searchQuery) {
                 page.click('.poster a'),
                 page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 })
             ]);
-            // Linkin ağ trafiğine düşmesi için kısa bir bekleme
             await new Promise(resolve => setTimeout(resolve, 3000)); 
         }
     } catch (e) {
@@ -103,9 +91,6 @@ async function scrapeHdFilmCehennemi(searchQuery) {
     return streamUrl;
 }
 
-// -------------------------------------------------------------------------
-// STREAM ENDPOINT
-// -------------------------------------------------------------------------
 app.get('/stream/:type/:id.json', async (req, res) => {
     const { id } = req.params;
     console.log(`Gelen İstek ID: ${id}`);
@@ -131,35 +116,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 });
 
-// -------------------------------------------------------------------------
-// CRITICAL RENDER PORT BINDING (Render için hayati olan kısım)
-// -------------------------------------------------------------------------
-const PORT = process.env.PORT || 10000; // Render varsayılan olarak 10000 kullanır
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Sunucu 0.0.0.0:${PORT} üzerinde başarıyla hazır!`);
 });
-```
-
-### 📦 İkinci Önemli Adım: `package.json` Güncellemesi
-
-Render'ın kütüphaneleri yüklerken şişmesini engellemek için `package.json` dosyasını da hafifletmemiz gerekiyor. `package.json` dosyanın içeriğini de tamamen silip şununla değiştir kanka:
-
-```json
-{
-  "name": "nuvio-eklenti",
-  "version": "1.0.0",
-  "description": "Nuvio HTTP Multi-Scraper Addon",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "axios": "^1.6.8",
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "puppeteer-core": "^22.6.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
-  }
-}
-```
