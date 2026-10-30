@@ -8,16 +8,19 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(cors());
 
-// Render üzerinde Puppeteer'ın kararlı çalışması için argümanlar
+// Render üzerinde Puppeteer'ın çökmeden, stabil çalışması için optimize argümanlar
 const puppeteerArgs = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
-    '--disable-gpu'
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process'
 ];
 
 // -------------------------------------------------------------------------
-// STREMIO / NUVIO MANIFEST (Eklentiyi uygulamaya tanıtan kısım)
+// STREMIO / NUVIO MANIFEST
 // -------------------------------------------------------------------------
 const manifest = {
     id: "org.kanka.httpaddon",
@@ -26,101 +29,100 @@ const manifest = {
     description: "Hdfilmcehennemi ve diğer sitelerden HTTP akışı sağlar.",
     resources: ["stream"],
     types: ["movie", "series"],
-    idPrefixes: ["tt"] // IMDb ID'lerini yakalamak için
+    idPrefixes: ["tt"]
 };
 
-// Ana sayfa isteği manifest dosyasına yönlendirilsin
 app.get('/', (req, res) => res.redirect('/manifest.json'));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
 // -------------------------------------------------------------------------
-// YARDIMCI FONKSİYON: IMDb ID'sini Film Adına Çevirme (Cinemeta API)
+// IMDb ID -> Film Adı Çevirici
 // -------------------------------------------------------------------------
 async function getMovieNameFromImdb(imdbId) {
     try {
-        // Stremio'nun resmi katalog servisinden filmin adını çekiyoruz
-        const response = await axios.get(`https://strem.io{imdbId}.json`);
+        const response = await axios.get(`https://strem.io{imdbId}.json`, { timeout: 5000 });
         if (response.data && response.data.meta) {
-            return response.data.meta.name; // Örn: "Spider-Man: Brand New Day"
+            return response.data.meta.name;
         }
     } catch (e) {
-        console.error("IMDb ID isim çevrim hatası:", e.message);
+        console.error("IMDb Çevrim Hatası:", e.message);
     }
     return null;
 }
 
 // -------------------------------------------------------------------------
-// SCRAPER: Hdfilmcehennemi'nden Link Yakalama Fonksiyonu
+// SCRAPER: Hdfilmcehennemi
 // -------------------------------------------------------------------------
 async function scrapeHdFilmCehennemi(searchQuery) {
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: puppeteerArgs,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
-    });
-
-    const page = await browser.newPage();
+    let browser;
     let streamUrl = null;
 
     try {
-        // Ağ trafiğini dinlemeyi açıyoruz
+        browser = await puppeteer.launch({
+            headless: true,
+            args: puppeteerArgs,
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
+        });
+
+        const page = await browser.newPage();
+        
+        // Sayfa yüklenme hızını artırmak için resimleri ve gereksiz fontları engelliyoruz
         await page.setRequestInterception(true);
         page.on('request', req => {
+            const type = req.resourceType();
             const url = req.url();
-            // Eğer rapidrame üzerinden master.m3u8 akışı geçiyorsa yakala
+            
             if (url.includes('master.m3u8') && url.includes('rapidrame')) {
                 streamUrl = url;
             }
-            req.continue();
+            
+            if (type === 'image' || type === 'font' || type === 'stylesheet') {
+                req.abort();
+            } else {
+                req.continue();
+            }
         });
 
-        // Güncel aktif site adresini buraya yazdık
         const searchUrl = `https://hdfilmcehennemi.land{encodeURIComponent(searchQuery)}`;
-        await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-        // Arama sonucundaki ilk filmin afiş linkini bul
         const firstResult = await page.$('.poster a'); 
         if (firstResult) {
-            // Filme tıkla ve sayfanın tamamen yüklenmesini bekle
             await Promise.all([
                 page.click('.poster a'),
-                page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 })
             ]);
-            // Oynatıcının (Rapidrame) yüklenip m3u8 linkini tetiklemesi için 4 saniye bekle
-            await new Promise(resolve => setTimeout(resolve, 4000)); 
+            // Linkin ağ trafiğine düşmesi için kısa bir bekleme
+            await new Promise(resolve => setTimeout(resolve, 3000)); 
         }
     } catch (e) {
         console.error("Scraper Hatası:", e.message);
     } finally {
-        await browser.close();
+        if (browser) await browser.close();
     }
     return streamUrl;
 }
 
 // -------------------------------------------------------------------------
-// STREMIO STREAM ENDPOINT (Uygulamanın film linklerini istediği ana kapı)
+// STREAM ENDPOINT
 // -------------------------------------------------------------------------
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { id } = req.params; // Stremio buradan "tt10872600" gibi ID gönderir
-    console.log(`Gelen İstek IMDb ID: ${id}`);
+    const { id } = req.params;
+    console.log(`Gelen İstek ID: ${id}`);
 
-    // 1. Aşama: ID'yi temiz sinema adına çevir
     const movieName = await getMovieNameFromImdb(id);
     if (!movieName) {
-        return res.json({ streams: [], message: "Film adı bulunamadı." });
+        return res.json({ streams: [] });
     }
     
-    console.log(`Aranan Film Adı: ${movieName}`);
-
-    // 2. Aşama: Hdfilmcehennemi sitesinde bu isimle tarama başlat
+    console.log(`Aranan Film: ${movieName}`);
     const videoUrl = await scrapeHdFilmCehennemi(movieName);
 
-    // 3. Aşama: Link bulunduysa Stremio oynatıcısına teslim et
     if (videoUrl) {
         res.json({
             streams: [{
                 name: "🎬 HFC - Rapidrame",
-                title: `${movieName}\n[1080p Stream - Dublaj/Altyazılı]`,
+                title: `${movieName}\n[1080p Stream]`,
                 url: videoUrl
             }]
         });
@@ -129,6 +131,35 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 });
 
-// Render veya Local port yönetimi
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Eklenti ${PORT} portunda başarıyla çalışıyor.`));
+// -------------------------------------------------------------------------
+// CRITICAL RENDER PORT BINDING (Render için hayati olan kısım)
+// -------------------------------------------------------------------------
+const PORT = process.env.PORT || 10000; // Render varsayılan olarak 10000 kullanır
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Sunucu 0.0.0.0:${PORT} üzerinde başarıyla hazır!`);
+});
+```
+
+### 📦 İkinci Önemli Adım: `package.json` Güncellemesi
+
+Render'ın kütüphaneleri yüklerken şişmesini engellemek için `package.json` dosyasını da hafifletmemiz gerekiyor. `package.json` dosyanın içeriğini de tamamen silip şununla değiştir kanka:
+
+```json
+{
+  "name": "nuvio-eklenti",
+  "version": "1.0.0",
+  "description": "Nuvio HTTP Multi-Scraper Addon",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer-core": "^22.6.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
+```
