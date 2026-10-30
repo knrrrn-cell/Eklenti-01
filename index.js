@@ -1,28 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const cheerio = require('cheerio');
 
-puppeteer.use(StealthPlugin());
 const app = express();
 app.use(cors());
 
-const puppeteerArgs = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--no-first-run',
-    '--no-zygote',
-    '--single-process'
-];
-
 const manifest = {
     id: "org.kanka.httpaddon",
-    version: "1.0.0",
-    name: "Kankas HTTP Multi-Stream",
-    description: "Hdfilmcehennemi ve FilmGecesi üzerinden HTTP akışı sağlar.",
+    version: "1.1.0",
+    name: "Kankas HTTP Multi-Stream (Işık Hızı)",
+    description: "Hdfilmcehennemi ve FilmGecesi sitelerinden doğrudan hızlı akış sağlar.",
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"]
@@ -31,132 +19,121 @@ const manifest = {
 app.get('/', (req, res) => res.redirect('/manifest.json'));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
-// Hem Türkçe hem İngilizce isimleri çekebilmek için Cinemeta API'yi geliştiriyoruz
-async function getMovieNamesFromImdb(imdbId) {
+// Cinemeta üzerinden filmin Türkçe ve İngilizce isimlerini öğrenme
+async function getMovieNames(imdbId) {
     try {
-        const response = await axios.get(`https://strem.io{imdbId}.json`, { timeout: 4000 });
+        const response = await axios.get(`https://strem.io{imdbId}.json`, { timeout: 3000 });
         if (response.data && response.data.meta) {
-            const meta = response.data.meta;
-            // Temiz arama için film isimlerini dizi olarak dönüyoruz
             return {
-                enName: meta.name,
-                trName: meta.locale && meta.locale.tr ? meta.locale.tr.name : meta.name
+                enName: response.data.meta.name,
+                trName: response.data.meta.locale && response.data.meta.locale.tr ? response.data.meta.locale.tr.name : response.data.meta.name
             };
         }
     } catch (e) {
-        console.error("IMDb Çevrim Hatası:", e.message);
+        console.error("Cinemeta hatası:", e.message);
     }
     return null;
 }
 
-// 1. KAYNAK: HDFILMCEHENNEMI SCRAPER
-async function scrapeHdFilmCehennemi(names, browser) {
-    let streamUrl = null;
-    const page = await browser.newPage();
-    
+// -------------------------------------------------------------------------
+// 1. ULTRA HIZLI KAYNAK: HDFILMCEHENNEMI (Axios + Cheerio + Regex)
+// -------------------------------------------------------------------------
+async function fastScrapeHFC(imdbId, names) {
     try {
-        await page.setRequestInterception(true);
-        page.on('request', req => {
-            const type = req.resourceType();
-            const url = req.url();
-            if (url.includes('master.m3u8') && url.includes('rapidrame')) {
-                streamUrl = url;
-            }
-            if (type === 'image' || type === 'font' || type === 'stylesheet') req.abort();
-            else req.continue();
-        });
-
-        // Önce Türkçe ismi, yoksa İngilizce ismi dene
-        const searchQuery = names.trName || names.enName;
-        const searchUrl = `https://hdfilmcehennemi.land{encodeURIComponent(searchQuery)}`;
+        const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
         
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        // 1. Aşama: Senin dediğin gibi önce IMDb ID ile, o olmazsa Türkçe isimle sitede arat
+        const searchWord = imdbId || names.trName || names.enName;
+        const searchUrl = `https://hdfilmcehennemi.land{encodeURIComponent(searchWord)}`;
+        
+        const searchResponse = await axios.get(searchUrl, { headers: { 'User-Agent': userAgent }, timeout: 4000 });
+        const $ = cheerio.load(searchResponse.data);
+        
+        // Arama sonucundaki ilk filmin detay sayfa linkini çek
+        const filmLink = $('.poster a').first().attr('href');
+        if (!filmLink) return null;
 
-        const firstResult = await page.$('.poster a'); 
-        if (firstResult) {
-            await Promise.all([
-                page.click('.poster a'),
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 })
-            ]);
-            // Render yavaşlığı için bekleme süresini 5 saniyeye çıkardık
-            await new Promise(resolve => setTimeout(resolve, 5000)); 
+        // 2. Aşama: Filmin detay sayfasına HTTP isteği at
+        const filmPageResponse = await axios.get(filmLink, { headers: { 'User-Agent': userAgent }, timeout: 4000 });
+        const pageHtml = filmPageResponse.data;
+
+        // 3. Aşama: Sayfa kodunun içindeki şifreli Rapidrame / Close player kaynak linklerini Regex ile havada yakala
+        // Bu regex yapıları iframe veya playlist tanımlarını yakalar
+        const masterM3u8Regex = /(https:\/\/s[0-9]+\.rapidrame\.com\/hls2\/[^\s'"]+master\.m3u8[^\s'"]*)/i;
+        const match = pageHtml.match(masterM3u8Regex);
+
+        if (match && match[1]) {
+            return {
+                name: "🎬 HFC - Rapidrame",
+                title: `Rapidrame [1080p Autoselect]`,
+                url: match[1].replace(/&amp;/g, '&') // HTML şifrelemesini temizle
+            };
         }
     } catch (e) {
-        console.error("HFC Scraper Hatası:", e.message);
-    } finally {
-        await page.close();
+        console.error("HFC Hızlı Tarama Hatası:", e.message);
     }
-    return streamUrl ? { name: "🎬 HFC - Rapidrame", title: `Rapidrame [1080p Stream]`, url: streamUrl } : null;
+    return null;
 }
 
-// 2. KAYNAK: FILMGECESI SCRAPER
-async function scrapeFilmGecesi(names, browser) {
-    let streamUrl = null;
-    const page = await browser.newPage();
-    
+// -------------------------------------------------------------------------
+// 2. ULTRA HIZLI KAYNAK: FILMGECESI (Axios + Cheerio + Regex)
+// -------------------------------------------------------------------------
+async function fastScrapeFilmGecesi(imdbId, names) {
     try {
-        await page.setRequestInterception(true);
-        page.on('request', req => {
-            const url = req.url();
-            if (url.includes('master.m3u8') && url.includes('rapidrame')) {
-                streamUrl = url;
-            }
-            req.continue();
-        });
+        const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36';
+        const searchWord = imdbId || names.trName || names.enName;
+        const searchUrl = `https://filmgecesi.vip{encodeURIComponent(searchWord)}`;
 
-        const searchQuery = names.trName || names.enName;
-        const searchUrl = `https://filmgecesi.vip{encodeURIComponent(searchQuery)}`;
+        const searchResponse = await axios.get(searchUrl, { headers: { 'User-Agent': userAgent }, timeout: 4000 });
+        const $ = cheerio.load(searchResponse.data);
+
+        const filmLink = $('.film-content a, .poster a, a[href*="/film/"]').first().attr('href');
+        if (!filmLink) return null;
+
+        const filmPageResponse = await axios.get(filmLink, { headers: { 'User-Agent': userAgent }, timeout: 4000 });
         
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        // FilmGecesi sayfa kodlarında veya iframe ağlarında m3u8 taraması
+        const m3u8Regex = /(https:\/\/[^\s'"]+master\.m3u8[^\s'"]*)/i;
+        const match = filmPageResponse.data.match(m3u8Regex);
 
-        // FilmGecesi sitelerindeki genel film linki seçicisi (a etiketlerini tarar)
-        const firstResult = await page.$('.film-content a, .poster a, a[href*="/film/"]');
-        if (firstResult) {
-            await Promise.all([
-                firstResult.click(),
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 })
-            ]);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+        if (match && match[1]) {
+            return {
+                name: "🎥 FilmGecesi - VIP",
+                title: `Rapidrame [HQ Stream]`,
+                url: match[1].replace(/&amp;/g, '&')
+            };
         }
     } catch (e) {
-        console.error("FilmGecesi Scraper Hatası:", e.message);
-    } finally {
-        await page.close();
+        console.error("FilmGecesi Hızlı Tarama Hatası:", e.message);
     }
-    return streamUrl ? { name: "🎥 FilmGecesi - VIP", title: `Rapidrame [HQ Stream]`, url: streamUrl } : null;
+    return null;
 }
 
 // MAIN STREAM ENDPOINT
 app.get('/stream/:type/:id.json', async (req, res) => {
-    const { id } = req.params;
-    console.log(`Gelen ID: ${id}`);
+    const { id } = req.params; // tt1234567 formatı
+    console.log(`Gelen IMDb ID: ${id}`);
 
-    const names = await getMovieNamesFromImdb(id);
+    const names = await getMovieNames(id);
     if (!names) return res.json({ streams: [] });
-    
-    console.log(`Aranan İsimler -> TR: ${names.trName} | EN: ${names.enName}`);
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: puppeteerArgs,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
-    });
+    console.log(`Aranıyor -> ID: ${id} | TR: ${names.trName}`);
 
-    // İki siteyi aynı anda paralel tarıyoruz
-    const scraperPromises = [
-        scrapeHdFilmCehennemi(names, browser),
-        scrapeFilmGecesi(names, browser)
+    // İki siteyi arka planda milisaniyeler içinde paralel taratıyoruz
+    const tasks = [
+        fastScrapeHFC(id, names),
+        fastScrapeFilmGecesi(id, names)
     ];
 
-    const results = await Promise.allSettled(scraperPromises);
-    await browser.close();
-
+    const results = await Promise.allSettled(tasks);
+    
     const activeStreams = results
         .filter(res => res.status === 'fulfilled' && res.value !== null)
         .map(res => res.value);
 
+    // Sonuçları Nuvio'ya anında fırlatıyoruz (Zaman aşımı riski sıfırlandı!)
     res.json({ streams: activeStreams });
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Eklenti hazır!`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Işık hızında çalışan eklenti aktif!`));
